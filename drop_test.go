@@ -31,9 +31,17 @@ const (
 // Created table size bigger than 1 << exponentialSize KB.
 // As a rule of thumb, there is overhead size about 30% of data in case of bigger than 1GB.
 func createTable(db *sql.DB, table string, exponentialSize int) error {
+	log.Printf("createTable start. %s table expected size %dMB", table, 1<<(exponentialSize-10))
+
+	binLogOffSql := "SET sql_log_bin = OFF"
+	_, err := db.Exec(binLogOffSql)
+	if err != nil {
+		return err
+	}
+
 	// Clear table
 	dropTableSql := fmt.Sprintf("DROP TABLE IF EXISTS %s", table)
-	_, err := db.Exec(dropTableSql)
+	_, err = db.Exec(dropTableSql)
 	if err != nil {
 		return err
 	}
@@ -59,6 +67,35 @@ func createTable(db *sql.DB, table string, exponentialSize int) error {
 		}
 	}
 
+	refreshSizeSql := fmt.Sprintf("ANALYZE TABLE %s", table)
+	_, err = db.Exec(refreshSizeSql)
+	if err != nil {
+		return err
+	}
+
+	sizeCheckSql := fmt.Sprintf(`SELECT 
+    round(((data_length + index_length) / 1024 / 1024), 2)
+FROM information_schema.TABLES 
+WHERE table_schema = database()
+    AND table_name = "%s";
+	`, table)
+	sizeResult := db.QueryRow(sizeCheckSql)
+	if sizeResult.Err() != nil {
+		return sizeResult.Err()
+	}
+	var tableSize string
+	err = sizeResult.Scan(&tableSize)
+	if err != nil {
+		return err
+	}
+
+	binLogOnSql := "SET sql_log_bin = ON"
+	_, err = db.Exec(binLogOnSql)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("createTable end. %s table real size %sMB", table, tableSize)
 	return nil
 }
 
@@ -89,13 +126,14 @@ func Test_NormalDrop_Mysql8_2_0_1GB(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	endpoint, _ := mysqlC.Endpoint(context.Background(), "tcp")
+	endpoint, _ := mysqlC.PortEndpoint(context.Background(), "3306", "tcp")
 
 	db, err := sql.Open("mysql", fmt.Sprintf("root:password@tcp(%s)/database", strings.TrimPrefix(endpoint, "tcp://")))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	log.Println("MySQL connected")
 
 	err = createTable(db, TEST_TABLE_NAME, SIZE_1GB)
 	if err != nil {
